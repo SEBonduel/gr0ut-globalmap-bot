@@ -37,6 +37,34 @@ DRY_RUN = os.environ.get("DRY_RUN", "").lower() in ("1", "true", "yes")
 SESSION = requests.Session()
 SESSION.headers.update({"User-Agent": "gr0ut-globalmap-bot/1.0"})
 
+# CDN images de maps Wargaming. Le nom de fichier vaut l'arena_id pour la
+# plupart des maps ; quelques-unes utilisent un autre nom -> overrides ci-dessous.
+MAP_CDN = os.environ.get("MAP_CDN", "https://eu-wotp.wgcdn.co/dcont/fb/image")
+MAP_IMAGE_OVERRIDES = {
+    "34_redshire": f"{MAP_CDN}/redshire.png",
+    "23_westfeld": f"{MAP_CDN}/westfield.png",
+}
+_image_cache = {}
+
+
+def map_image_url(arena_id):
+    """URL d'image de la map, vérifiée en ligne. None si indisponible."""
+    if not arena_id:
+        return None
+    if arena_id in _image_cache:
+        return _image_cache[arena_id]
+    url = MAP_IMAGE_OVERRIDES.get(arena_id, f"{MAP_CDN}/{arena_id}.png")
+    resolved = None
+    try:
+        r = SESSION.get(url, timeout=10, stream=True)
+        if r.status_code == 200 and r.headers.get("content-type", "").startswith("image"):
+            resolved = url
+        r.close()
+    except requests.RequestException:
+        resolved = None
+    _image_cache[arena_id] = resolved
+    return resolved
+
 
 # --- Petits helpers API ------------------------------------------------------
 
@@ -131,6 +159,7 @@ def collect_upcoming_battles(clan_id):
                 "front_id": front_id,
                 "province_id": prov.get("province_id"),
                 "province_name": prov.get("province_name"),
+                "arena_id": prov.get("arena_id"),
                 "arena_name": prov.get("arena_name"),
                 "prime_time": prov.get("prime_time"),
                 "start": start,
@@ -158,38 +187,51 @@ def save_state(state):
 # --- Discord -----------------------------------------------------------------
 
 ROLE_EMOJI = {"Attaque": "⚔️", "Défense": "🛡️", "Débarquement": "🪂"}
+ROLE_COLOR = {"Attaque": 0xE74C3C, "Défense": 0x3498DB, "Débarquement": 0x9B59B6}
 
 
-def post_discord(slot_start, battles, tags):
-    """Poste un embed Discord regroupant toutes les batailles d'un créneau."""
-    heure = slot_start.strftime("%Hh%M")
-    lines = []
-    for b in sorted(battles, key=lambda x: x["arena_name"] or ""):
-        emoji = ROLE_EMOJI.get(b["role"], "•")
-        opp = " / ".join(tags.get(int(o), str(o)) for o in b["opponents"]) or "—"
-        lines.append(
-            f"{emoji} **{b['arena_name']}** — {b['province_name']} "
-            f"({b['role']} vs {opp})"
-        )
-
+def build_embed(battle, tags):
+    """Un embed par bataille : titre = map, vignette = image de la map."""
+    emoji = ROLE_EMOJI.get(battle["role"], "•")
+    opp = " / ".join(tags.get(int(o), str(o)) for o in battle["opponents"]) or "—"
+    heure = battle["start"].strftime("%Hh%M")
     embed = {
-        "title": f"🎯 Batailles Carte Globale à {heure}",
-        "description": "\n".join(lines),
-        "color": 0x2ECC71,
-        "footer": {"text": "GR0UT • notif ~1h avant • données API Wargaming"},
-        "timestamp": slot_start.astimezone(ZoneInfo("UTC")).isoformat(),
+        "title": f"{emoji} {battle['arena_name']}",
+        "description": (
+            f"**{battle['province_name']}** — {battle['role']} vs **{opp}**\n"
+            f"🕒 Bataille à **{heure}**"
+        ),
+        "color": ROLE_COLOR.get(battle["role"], 0x2ECC71),
+        "footer": {"text": "GR0UT • Carte Globale • données API Wargaming"},
     }
-    body = {
-        "content": f"@here Ce soir **{len(battles)} bataille(s)** à **{heure}** 👇",
-        "embeds": [embed],
-    }
+    img = map_image_url(battle["arena_id"])
+    if img:
+        embed["thumbnail"] = {"url": img}
+    return embed
 
+
+def _send(body):
     if DRY_RUN or not WEBHOOK_URL:
         print("[DRY-RUN] Discord payload:")
         print(json.dumps(body, ensure_ascii=False, indent=2))
         return
     resp = SESSION.post(WEBHOOK_URL, json=body, timeout=20)
     resp.raise_for_status()
+
+
+def post_discord(slot_start, battles, tags):
+    """Poste les batailles d'un créneau (un embed par bataille, max 10/message)."""
+    heure = slot_start.strftime("%Hh%M")
+    embeds = [build_embed(b, tags)
+              for b in sorted(battles, key=lambda x: x["arena_name"] or "")]
+    content = f"@here 🎯 **{len(battles)} bataille(s)** ce soir à **{heure}** :"
+
+    # Discord limite à 10 embeds par message -> on découpe si besoin.
+    for i in range(0, len(embeds), 10):
+        _send({
+            "content": content if i == 0 else "",
+            "embeds": embeds[i:i + 10],
+        })
 
 
 # --- Entrée ------------------------------------------------------------------
