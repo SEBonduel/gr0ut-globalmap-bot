@@ -189,17 +189,28 @@ def save_state(state):
 ROLE_EMOJI = {"Attaque": "⚔️", "Défense": "🛡️", "Débarquement": "🪂"}
 ROLE_COLOR = {"Attaque": 0xE74C3C, "Défense": 0x3498DB, "Débarquement": 0x9B59B6}
 
+JOURS_FR = ["lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche"]
+MOIS_FR = ["janvier", "février", "mars", "avril", "mai", "juin", "juillet",
+           "août", "septembre", "octobre", "novembre", "décembre"]
+
+
+def date_fr(dt):
+    """'samedi 4 juillet 2026 à 19h15'."""
+    return (f"{JOURS_FR[dt.weekday()]} {dt.day} {MOIS_FR[dt.month - 1]} "
+            f"{dt.year} à {dt:%Hh%M}")
+
 
 def build_embed(battle, tags):
     """Un embed par bataille : titre = map, vignette = image de la map."""
     emoji = ROLE_EMOJI.get(battle["role"], "•")
     opp = " / ".join(tags.get(int(o), str(o)) for o in battle["opponents"]) or "—"
-    heure = battle["start"].strftime("%Hh%M")
+    ts = int(battle["start"].timestamp())  # pour les timestamps dynamiques Discord
     embed = {
         "title": f"{emoji} {battle['arena_name']}",
         "description": (
             f"**{battle['province_name']}** — {battle['role']} vs **{opp}**\n"
-            f"🕒 Bataille à **{heure}**"
+            f"🗓️ **{date_fr(battle['start'])}**\n"
+            f"⏳ <t:{ts}:R>"
         ),
         "color": ROLE_COLOR.get(battle["role"], 0x2ECC71),
         "footer": {"text": "GR0UT • Carte Globale • données API Wargaming"},
