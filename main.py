@@ -35,9 +35,11 @@ TZ = ZoneInfo(os.environ.get("TZ_NAME", "Europe/Paris"))
 
 # Fenêtre de notification : on prévient quand la bataille démarre dans
 # [LEAD_MIN ; LEAD_MAX] minutes. Défaut ≈ 1h avant.
-# Fenêtre large (35-90 min) : marge contre les retards de cron GitHub, l'anti-
-# doublon garantit un seul envoi par bataille.
-LEAD_MIN = int(os.environ.get("LEAD_MIN", "35"))
+# Fenêtre 15-90 min. Plancher bas car les manches de tournoi n'apparaissent
+# que ~45 min avant, et les crons GitHub ont souvent ~10 min de retard : il faut
+# assez de largeur pour que plusieurs passages attrapent la bataille.
+# L'anti-doublon garantit un seul envoi par bataille.
+LEAD_MIN = int(os.environ.get("LEAD_MIN", "15"))
 LEAD_MAX = int(os.environ.get("LEAD_MAX", "90"))
 
 STATE_FILE = os.environ.get("STATE_FILE", "state.json")
