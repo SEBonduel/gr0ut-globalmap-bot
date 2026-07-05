@@ -28,6 +28,9 @@ WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "").strip()
 CW_ROLE_ID = os.environ.get("CW_ROLE_ID", "").strip()
 
 API_BASE = os.environ.get("WG_API_BASE", "https://api.worldoftanks.eu")
+# L'API renvoie les heures de bataille en UTC (heure naïve) ; on les convertit
+# pour l'affichage. Ne pas confondre les deux (sinon décalage de 1-2h).
+API_TZ = ZoneInfo(os.environ.get("API_TZ_NAME", "UTC"))
 TZ = ZoneInfo(os.environ.get("TZ_NAME", "Europe/Paris"))
 
 # Fenêtre de notification : on prévient quand la bataille démarre dans
@@ -171,7 +174,8 @@ def collect_upcoming_battles(clan_id):
             start_raw = prov.get("battles_start_at")
             if not start_raw:
                 continue
-            start = datetime.fromisoformat(start_raw).replace(tzinfo=TZ)
+            # heure API = UTC naïve -> on la marque UTC puis on convertit en TZ d'affichage
+            start = datetime.fromisoformat(start_raw).replace(tzinfo=API_TZ).astimezone(TZ)
             battles.append({
                 "front_id": front_id,
                 "province_id": prov.get("province_id"),
