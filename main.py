@@ -12,6 +12,7 @@ Aucune dépendance lourde : requests + stdlib.
 import json
 import os
 import sys
+import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -22,6 +23,9 @@ import requests
 APP_ID = os.environ.get("WG_APP_ID", "").strip()
 CLAN_ID = int(os.environ.get("WG_CLAN_ID", "500165786"))          # GR0UT par défaut
 WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "").strip()
+
+# Rôle Discord à ping à H-1 (id du rôle). Vide -> @here.
+CW_ROLE_ID = os.environ.get("CW_ROLE_ID", "").strip()
 
 API_BASE = os.environ.get("WG_API_BASE", "https://api.worldoftanks.eu")
 TZ = ZoneInfo(os.environ.get("TZ_NAME", "Europe/Paris"))
@@ -68,16 +72,29 @@ def map_image_url(arena_id):
 
 # --- Petits helpers API ------------------------------------------------------
 
-def api_get(path, **params):
-    """Appel GET à l'API WG. Lève une exception sur erreur métier."""
+TRANSIENT = {"SOURCE_NOT_AVAILABLE", "REQUEST_LIMIT_EXCEEDED"}
+
+
+def api_get(path, _retries=3, **params):
+    """Appel GET à l'API WG, avec retries sur erreurs transitoires."""
     params["application_id"] = APP_ID
     url = f"{API_BASE}/{path.strip('/')}/"
-    resp = SESSION.get(url, params=params, timeout=20)
-    resp.raise_for_status()
-    payload = resp.json()
-    if payload.get("status") != "ok":
-        raise RuntimeError(f"API error on {path}: {payload.get('error')}")
-    return payload["data"]
+    last = None
+    for attempt in range(_retries):
+        try:
+            resp = SESSION.get(url, params=params, timeout=20)
+            resp.raise_for_status()
+            payload = resp.json()
+            if payload.get("status") == "ok":
+                return payload["data"]
+            err = payload.get("error") or {}
+            last = RuntimeError(f"API error on {path}: {err}")
+            if err.get("message") not in TRANSIENT:
+                raise last
+        except requests.RequestException as exc:
+            last = exc
+        time.sleep(2 * (attempt + 1))
+    raise last
 
 
 def active_eu_fronts():
@@ -169,6 +186,47 @@ def collect_upcoming_battles(clan_id):
     return battles
 
 
+# --- Provinces possédées (gains / pertes) ------------------------------------
+
+def owned_provinces(clan_id):
+    """{province_id: {name, arena}} des provinces actuellement détenues."""
+    owned = {}
+    for front_id in active_eu_fronts():
+        data = api_get("wot/globalmap/clanprovinces",
+                       clan_id=clan_id, front_id=front_id)
+        for p in (data.get(str(clan_id)) or []):
+            owned[p["province_id"]] = {
+                "name": p.get("province_name"),
+                "arena": p.get("arena_name"),
+            }
+    return owned
+
+
+def check_province_changes(state):
+    """Compare les provinces détenues au snapshot précédent, annonce gains/pertes."""
+    current = owned_provinces(CLAN_ID)
+    prev = state.get("owned")
+    state["owned"] = current
+
+    if prev is None:
+        print("provinces: snapshot initial enregistré.")
+        return True  # à persister, pas d'annonce au 1er passage
+
+    prev_ids, cur_ids = set(prev), set(current)
+    gained, lost = cur_ids - prev_ids, prev_ids - cur_ids
+
+    for pid in sorted(gained):
+        p = current[pid]
+        _send({"content": f"🏆 **GR0UT a pris {p['name']}** ({p['arena']}) ! 🎉"})
+    for pid in sorted(lost):
+        p = prev[pid]
+        _send({"content": f"💔 GR0UT a perdu **{p['name']}** ({p.get('arena')})."})
+
+    if gained or lost:
+        print(f"provinces: +{len(gained)} / -{len(lost)}.")
+    return bool(gained or lost)
+
+
 # --- État (anti-doublon) -----------------------------------------------------
 
 def load_state():
@@ -235,13 +293,21 @@ def post_discord(slot_start, battles, tags):
     heure = slot_start.strftime("%Hh%M")
     embeds = [build_embed(b, tags)
               for b in sorted(battles, key=lambda x: x["arena_name"] or "")]
-    content = f"@here 🎯 **{len(battles)} bataille(s)** ce soir à **{heure}** :"
+
+    if CW_ROLE_ID:
+        ping = f"<@&{CW_ROLE_ID}>"
+        mentions = {"roles": [CW_ROLE_ID]}
+    else:
+        ping = "@here"
+        mentions = {"parse": ["everyone"]}
+    content = f"{ping} 🎯 **{len(battles)} bataille(s)** ce soir à **{heure}** — présentez-vous !"
 
     # Discord limite à 10 embeds par message -> on découpe si besoin.
     for i in range(0, len(embeds), 10):
         _send({
             "content": content if i == 0 else "",
             "embeds": embeds[i:i + 10],
+            "allowed_mentions": mentions if i == 0 else {"parse": []},
         })
 
 
@@ -252,41 +318,44 @@ def main():
         sys.exit("WG_APP_ID manquant (secret).")
 
     now = datetime.now(TZ)
-    lo, hi = now + timedelta(minutes=LEAD_MIN), now + timedelta(minutes=LEAD_MAX)
+    state = load_state()
 
-    battles = collect_upcoming_battles(CLAN_ID)
-    due = [b for b in battles if lo <= b["start"] <= hi]
+    # La Carte Globale a des fenêtres d'indispo (SOURCE_NOT_AVAILABLE) : on ne
+    # fait pas planter le run, on saute simplement ce cycle.
+    try:
+        # 1) Provinces gagnées / perdues (vérifié à chaque run).
+        changed = check_province_changes(state)
 
-    print(f"{now:%Y-%m-%d %H:%M %Z} — {len(battles)} bataille(s) GR0UT au total, "
-          f"{len(due)} dans la fenêtre {LEAD_MIN}-{LEAD_MAX} min.")
-
-    if not due:
+        # 2) Notifications des batailles à venir (~1h avant).
+        battles = collect_upcoming_battles(CLAN_ID)
+    except RuntimeError as exc:
+        print(f"[warn] Carte Globale indisponible, cycle ignoré : {exc}")
         return
 
-    state = load_state()
-    notified = set(state.get("notified", []))
-    tags = resolve_clan_tags({o for b in due for o in b["opponents"]})
+    lo, hi = now + timedelta(minutes=LEAD_MIN), now + timedelta(minutes=LEAD_MAX)
+    due = [b for b in battles if lo <= b["start"] <= hi]
+    print(f"{now:%Y-%m-%d %H:%M %Z} — {len(battles)} bataille(s) GR0UT, "
+          f"{len(due)} dans la fenêtre {LEAD_MIN}-{LEAD_MAX} min.")
 
-    # Regroupe par créneau horaire (même prime time = un seul message).
-    slots = {}
-    for b in due:
-        slots.setdefault(b["start"], []).append(b)
-
-    changed = False
-    for start, group in sorted(slots.items()):
-        key = f"{start.date()}#{start:%H:%M}"
-        if key in notified:
-            continue
-        post_discord(start, group, tags)
-        notified.add(key)
-        changed = True
-        print(f"  → notifié créneau {key} ({len(group)} bataille(s)).")
-
-    if changed:
-        # On ne garde que les clés récentes (7 jours) pour éviter que le
-        # fichier ne gonfle indéfiniment.
+    if due:
+        notified = set(state.get("notified", []))
+        tags = resolve_clan_tags({o for b in due for o in b["opponents"]})
+        slots = {}
+        for b in due:
+            slots.setdefault(b["start"], []).append(b)
+        for start, group in sorted(slots.items()):
+            key = f"{start.date()}#{start:%H:%M}"
+            if key in notified:
+                continue
+            post_discord(start, group, tags)
+            notified.add(key)
+            changed = True
+            print(f"  → notifié créneau {key} ({len(group)} bataille(s)).")
+        # On ne garde que les clés récentes (7 jours).
         cutoff = (now.date() - timedelta(days=7)).isoformat()
         state["notified"] = sorted(k for k in notified if k.split("#")[0] >= cutoff)
+
+    if changed:
         save_state(state)
 
 
