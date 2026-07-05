@@ -1,10 +1,8 @@
 {
-  "notified": [],
+  "notified": [
+    "2026-07-05#22:15"
+  ],
   "owned": {
-    "sarandidelyi": {
-      "name": "Sarandí del Yí",
-      "arena": "Cliff"
-    },
     "avanavero": {
       "name": "Avanavero",
       "arena": "Sand River"
