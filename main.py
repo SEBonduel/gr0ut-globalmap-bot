@@ -143,50 +143,48 @@ def resolve_clan_tags(clan_ids):
 
 # --- Logique métier ----------------------------------------------------------
 
-def battle_involving_clan(province, clan_id):
-    """
-    Renvoie (role, opponents) si le clan est impliqué dans une bataille sur
-    cette province ce soir, sinon None.
-    """
-    attackers = province.get("attackers") or []
-    competitors = province.get("competitors") or []
-    owner = province.get("owner_clan_id")
+# Type de bataille renvoyé par clanbattles -> libellé.
+ROLE_FROM_TYPE = {"attack": "Attaque", "defense": "Défense"}
 
-    if owner == clan_id and attackers:
-        return "Défense", attackers
-    if clan_id in attackers:
-        opponents = [owner] if owner else [c for c in competitors if c != clan_id]
-        return "Attaque", opponents
-    if clan_id in competitors:
-        return "Débarquement", [c for c in competitors if c != clan_id]
-    return None
+
+def province_arenas(battles_raw):
+    """{province_id: (arena_id, arena_name)} pour les provinces des batailles."""
+    by_front = {}
+    for b in battles_raw:
+        by_front.setdefault(b["front_id"], set()).add(b["province_id"])
+    arena = {}
+    for front_id, pids in by_front.items():
+        data = api_get("wot/globalmap/provinces", front_id=front_id,
+                       province_id=",".join(pids), limit=100)
+        for p in (data or []):
+            arena[p["province_id"]] = (p.get("arena_id"), p.get("arena_name"))
+    return arena
 
 
 def collect_upcoming_battles(clan_id):
-    """Scanne les fronts actifs et renvoie les batailles impliquant le clan."""
+    """
+    Batailles RÉELLEMENT programmées par le clan (division posée), via
+    l'endpoint clanbattles. On ignore donc les provinces où le clan est
+    seulement "impliqué" sans division (ex. défense non défendue).
+    """
+    raw = api_get("wot/globalmap/clanbattles", clan_id=clan_id)
+    if not raw:
+        return []
+    arena = province_arenas(raw)
     battles = []
-    for front_id in active_eu_fronts():
-        for prov in iter_front_provinces(front_id):
-            result = battle_involving_clan(prov, clan_id)
-            if not result:
-                continue
-            role, opponents = result
-            start_raw = prov.get("battles_start_at")
-            if not start_raw:
-                continue
-            # heure API = UTC naïve -> on la marque UTC puis on convertit en TZ d'affichage
-            start = datetime.fromisoformat(start_raw).replace(tzinfo=API_TZ).astimezone(TZ)
-            battles.append({
-                "front_id": front_id,
-                "province_id": prov.get("province_id"),
-                "province_name": prov.get("province_name"),
-                "arena_id": prov.get("arena_id"),
-                "arena_name": prov.get("arena_name"),
-                "prime_time": prov.get("prime_time"),
-                "start": start,
-                "role": role,
-                "opponents": opponents,
-            })
+    for b in raw:
+        aid, aname = arena.get(b["province_id"], (None, None))
+        battles.append({
+            "front_id": b.get("front_id"),
+            "province_id": b.get("province_id"),
+            "province_name": b.get("province_name"),
+            "arena_id": aid,
+            "arena_name": aname or b.get("province_name"),
+            # clanbattles fournit un timestamp unix -> aucun souci de fuseau
+            "start": datetime.fromtimestamp(b["time"], TZ),
+            "role": ROLE_FROM_TYPE.get(b.get("type"), "Bataille"),
+            "opponents": [b["competitor_id"]] if b.get("competitor_id") else [],
+        })
     return battles
 
 
