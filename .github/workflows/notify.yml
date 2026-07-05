@@ -1,12 +1,10 @@
 name: Notif batailles Carte Globale
 
+# ⚠️ Cron DÉSACTIVÉ : ce bot est remplacé par le Worker Cloudflare
+# (gr0ut-globalmap-worker) dont le cron 5 min est fiable — GitHub Actions
+# throttlait les runs planifiés à ~1/h. Conservé en dispatch manuel / secours.
 on:
-  schedule:
-    # Toutes les 15 min entre 12h00 et 22h45 UTC.
-    # (= env. 14h00 -> 00h45 heure de Paris en été, de quoi prévenir 1h
-    #  avant tous les prime times du soir.)
-    - cron: "*/5 13-22 * * *"
-  workflow_dispatch: {}   # permet de lancer à la main depuis l'onglet Actions
+  workflow_dispatch: {}
 
 # Nécessaire pour que l'action puisse committer state.json (anti-doublon).
 permissions:
