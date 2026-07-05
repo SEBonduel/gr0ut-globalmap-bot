@@ -35,8 +35,10 @@ TZ = ZoneInfo(os.environ.get("TZ_NAME", "Europe/Paris"))
 
 # Fenêtre de notification : on prévient quand la bataille démarre dans
 # [LEAD_MIN ; LEAD_MAX] minutes. Défaut ≈ 1h avant.
-LEAD_MIN = int(os.environ.get("LEAD_MIN", "45"))
-LEAD_MAX = int(os.environ.get("LEAD_MAX", "75"))
+# Fenêtre large (35-90 min) : marge contre les retards de cron GitHub, l'anti-
+# doublon garantit un seul envoi par bataille.
+LEAD_MIN = int(os.environ.get("LEAD_MIN", "35"))
+LEAD_MAX = int(os.environ.get("LEAD_MAX", "90"))
 
 STATE_FILE = os.environ.get("STATE_FILE", "state.json")
 DRY_RUN = os.environ.get("DRY_RUN", "").lower() in ("1", "true", "yes")
